@@ -4,3 +4,7 @@ env/**
 outputs/**
 outputs/
 outputs/*
+**.ods
+*.ods
+**.xlsx
+*.xlsx
