@@ -919,12 +919,12 @@ with st.container():
 with st.expander("Why is it flagged? (numbers vs thresholds)"):
     st.write(
         f"- **IDR/ticket (actual):** "
-        f"{'NaN' if pd.isna(overall['idr_per_ticket']) else f'{overall['idr_per_ticket']:,.2f}'}  "
+        f"{'NaN' if pd.isna(overall['idr_per_ticket']) else format_number(overall['idr_per_ticket'], 2)}  "
         f"→ Fraud if **< {overall['th_fraud']:,.2f}**, Potential if **≤ {overall['th_potential']:,.2f}**"
     )
     st.write(
         f"- **Cost Index % (actual):** "
-        f"{'NaN' if pd.isna(overall['value_eff_pct']) else f'{overall['value_eff_pct']:,.2f}%'}  "
+        f"{'NaN' if pd.isna(overall['value_eff_pct']) else format_number(overall['value_eff_pct'], 2) + '%'}  "
         f"→ Fraud if **< {overall['th_eff_fraud']:,.0f}%**, Potential if **≤ {overall['th_eff_potential']:,.0f}%**"
     )
     st.caption("Tip: Tweak thresholds in the sidebar if the flagging feels too strict.")
