@@ -12,6 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any, List
 
+import base64
 import numpy as np
 import pandas as pd
 import re
@@ -33,10 +34,86 @@ st.markdown(
       .stDownloadButton, .stButton>button { border-radius: 10px; }
       .tablesmall table td, .tablesmall table th { font-size: 0.9rem; }
       .open-col button { width: 100%; }
+      .logo-wrapper { display: flex; justify-content: center; margin: 1.5rem 0; }
+      .logo-wrapper.logo-sidebar { justify-content: flex-start; margin: 0 0 1.5rem; }
+      .logo-circle { width: 110px; height: 110px; border-radius: 50%; object-fit: cover; border: 2px solid #f0f0f0; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12); }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+# ===========================
+# Branding helpers
+# ===========================
+def render_logo(sidebar: bool = False) -> None:
+    logo_path = Path(__file__).with_name("logo.png")
+    if not logo_path.exists():
+        return
+    try:
+        encoded_logo = base64.b64encode(logo_path.read_bytes()).decode()
+    except Exception:
+        return
+
+    container = st.sidebar if sidebar else st
+    wrapper_class = "logo-wrapper logo-sidebar" if sidebar else "logo-wrapper"
+
+    container.markdown(
+        f"""
+        <div class="{wrapper_class}">
+            <img src="data:image/png;base64,{encoded_logo}" alt="CPCM logo" class="logo-circle" />
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+render_logo(sidebar=True)
+
+
+# ===========================
+# Simple authentication
+# ===========================
+VALID_USER_ID = "cpcm"
+VALID_PASSWORD = "cpcmcpcm"
+AUTH_SESSION_KEY = "authenticated"
+
+
+def _trigger_rerun() -> bool:
+    """Try to rerun the app using any available Streamlit API."""
+    for fn_name in ("experimental_rerun", "rerun"):
+        rerun_fn = getattr(st, fn_name, None)
+        if callable(rerun_fn):
+            rerun_fn()
+            return True
+    return False
+
+
+def require_login() -> None:
+    if st.session_state.get(AUTH_SESSION_KEY, False):
+        return
+
+    title_box = st.empty()
+    title_box.title("Please Login")
+    form_box = st.empty()
+    with form_box.form("login_form"):
+        user_id = st.text_input("ID")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Submit")
+
+    if submitted:
+        if user_id == VALID_USER_ID and password == VALID_PASSWORD:
+            st.session_state[AUTH_SESSION_KEY] = True
+            form_box.empty()
+            title_box.empty()
+            st.success("Login Success.")
+            if not _trigger_rerun():
+                return
+        else:
+            st.error("Wrong ID or password.")
+
+    st.stop()
+
 
 # ===========================
 # Default column keys (can be remapped in the sidebar)
@@ -517,7 +594,17 @@ def prepare_dataframe(df: pd.DataFrame, colmap: Dict[str, str]) -> pd.DataFrame:
 # ===========================
 # Sidebar controls
 # ===========================
+require_login()
+
 st.sidebar.title("Controls")
+
+if st.sidebar.button("Log out"):
+    st.session_state.pop(AUTH_SESSION_KEY, None)
+    if not _trigger_rerun():
+        st.stop()
+
+if st.session_state.get(AUTH_SESSION_KEY, False):
+    st.sidebar.caption("Hi There!")
 
 uploaded = st.sidebar.file_uploader(
     "Upload spreadsheet (.ods, .xlsx, .xlsm, .xls)",
