@@ -414,7 +414,10 @@ def compute_overall_log(
     idr_per_ticket = (total_topup / total_tickets) if total_tickets > 0 else np.nan
     flag = _decide_flag(idr_per_ticket, th_fraud, th_potential)
 
-    value_eff_pct = (idr_per_ticket * 100) if not pd.isna(idr_per_ticket) else np.nan
+    if total_topup > 0:
+        value_eff_pct = (total_tickets / total_topup) * 100
+    else:
+        value_eff_pct = np.nan
     flag_eff = _decide_flag(value_eff_pct, th_eff_fraud, th_eff_potential)
 
     earned_total = (
@@ -660,14 +663,14 @@ with st.sidebar.expander("🚨 Fraud Thresholds (IDR / ticket & Cost Index %)"):
     th_eff_fraud = st.number_input(
         "Cost Index (%): mark as Fraud if < this value",
         min_value=0.0,
-        value=50.0,
+        value=20.0,
         step=50.0,
-        help="Cost Index = (Total Top Up / Total Tickets) × 100",
+        help="Cost Index = (Total Tickets / Total Top Up ) × 100",
     )
     th_eff_potential = st.number_input(
         "Cost Index (%): Potential Fraud upper bound",
         min_value=0.0,
-        value=100.0,
+        value=40.0,
         step=50.0,
     )
     top_k_sets = st.slider(
