@@ -1146,6 +1146,85 @@ with st.expander("🧭 Interactive Charts (Plotly)"):
     st.plotly_chart(fig_pie, use_container_width=True)
 
 # ===========================
+# Top Tickets Inflow per Activity Site
+# ===========================
+st.subheader("🏆 Top Tickets Inflow per Activity Site")
+st.caption(f"**Card Issued Store:** {card_store or '—'}")
+
+if COL_SITE in df.columns:
+    site_agg = (
+        df.groupby(COL_SITE, dropna=False)[TICKET_COLS_ALL]
+        .sum()
+        .reset_index()
+    )
+
+    site_agg["Total Tickets Inflow"] = site_agg[TICKET_COLS_ALL].sum(axis=1)
+    site_agg = site_agg.sort_values("Total Tickets Inflow", ascending=False)
+
+    format_map = {col: 0 for col in TICKET_COLS_ALL + ["Total Tickets Inflow"]}
+    site_agg_display = format_dataframe_columns(site_agg, format_map)
+
+    st.dataframe(
+        site_agg_display,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # Download CSV
+    csv_site = site_agg.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        f"⬇️ Download Top Tickets per Activity Site ({selected_sheet})",
+        data=csv_site,
+        file_name=f"top_tickets_site_{selected_sheet}.csv",
+        mime="text/csv",
+    )
+else:
+    st.info(
+        "Column 'Activity Site' not found."
+    )
+
+# ===========================
+# Tickets Redeemed per Activity Site
+# ===========================
+st.subheader("🎟️ Tickets Redeemed per Activity Site")
+st.caption(f"**Card Issued Store:** {card_store or '—'}")
+
+if COL_SITE in df.columns and COL_TICKETS_REDEEMED in df.columns:
+    df_red = df.copy()
+    df_red["Tickets Redeemed (Abs)"] = df_red[COL_TICKETS_REDEEMED].abs()
+
+    site_red = (
+        df_red.groupby(COL_SITE, dropna=False)["Tickets Redeemed (Abs)"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Tickets Redeemed (Abs)": "Total Tickets Redeemed"})
+    )
+
+    site_red = site_red.sort_values("Total Tickets Redeemed", ascending=False)
+
+    site_red_display = format_dataframe_columns(
+        site_red,
+        {"Total Tickets Redeemed": 0},
+    )
+
+    st.dataframe(
+        site_red_display,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    csv_site_red = site_red.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        f"⬇️ Download Tickets Redeemed per Activity Site ({selected_sheet})",
+        data=csv_site_red,
+        file_name=f"tickets_redeemed_site_{selected_sheet}.csv",
+        mime="text/csv",
+    )
+else:
+    "Column 'Activity Site' not found."
+
+
+# ===========================
 # Redemption Set Aggregation (LOADTICKETS)
 # ===========================
 st.subheader("🧩 Redemption Set Aggregation (LOADTICKETS)")
