@@ -868,9 +868,7 @@ st.dataframe(
     column_config={
         "Card Number": st.column_config.TextColumn("Card Number", width="medium"),
         "Customer Name": st.column_config.TextColumn("Customer Name", width="medium"),
-        "Card Issued Store": st.column_config.TextColumn(
-            "Card Issued Store", width="medium"
-        ),
+        "Card Issued Store": st.column_config.TextColumn("Card Issued Store", width="medium"),
         "IDR per Ticket": st.column_config.TextColumn("IDR per Ticket"),
         "Cost Index (%)": st.column_config.TextColumn("Cost Index (%)"),
         "Flagging (IDR/Ticket)": st.column_config.TextColumn("Flagging (IDR/Ticket)"),
@@ -881,11 +879,455 @@ st.dataframe(
         "Top Up Count": st.column_config.TextColumn("Top Up Count", width="small"),
         "Total Tickets Inflow": st.column_config.TextColumn("Total Tickets Inflow"),
         "Tickets Redeemed": st.column_config.TextColumn("Tickets Redeemed"),
-        "Possible Customer Ticket Left": st.column_config.TextColumn(
-            "Possible Customer Ticket Left"
-        ),
+        "Possible Customer Ticket Left": st.column_config.TextColumn("Possible Customer Ticket Left"),
     },
 )
+
+# ===========================
+# Multi-sheet: Top metrics per Activity Site (aggregate across all digit sheets)
+# ===========================
+st.markdown("---")
+st.subheader("📊 Cross-Sheet — Top Activity Site Metrics")
+st.caption("Aggregate semua sheet (yang diproses di Multi-Sheet Summary).")
+
+# Build per-sheet site-level aggregates and then combine
+site_topup_frames = []
+site_tickets_frames = []
+site_redeemed_frames = []
+
+for sn, dfn in prepared_per_sheet.items():
+    if dfn is None or dfn.empty:
+        continue
+
+    # Topup (Amount)
+    if (COL_SITE in dfn.columns) and (COL_AMOUNT in dfn.columns):
+        try:
+            s = (
+                dfn.groupby(COL_SITE, dropna=False)[COL_AMOUNT]
+                .sum()
+                .reset_index()
+                .rename(columns={COL_AMOUNT: "Total Top Up (IDR)"})
+            )
+            s["Sheet"] = sn
+            site_topup_frames.append(s)
+        except Exception:
+            pass
+
+    # Tickets Inflow (sum of ticket inflow columns)
+    ticket_cols_present_local = [c for c in TICKET_COLS_ALL if c in dfn.columns]
+    if (COL_SITE in dfn.columns) and ticket_cols_present_local:
+        try:
+            t = (
+                dfn.groupby(COL_SITE, dropna=False)[ticket_cols_present_local]
+                .sum()
+                .reset_index()
+            )
+            # compute total tickets inflow per site
+            t["Total Tickets Inflow"] = t[ticket_cols_present_local].sum(axis=1)
+            t = t[[COL_SITE, "Total Tickets Inflow"]]
+            t["Sheet"] = sn
+            site_tickets_frames.append(t)
+        except Exception:
+            pass
+
+    # Tickets Redeemed (absolute sum)
+    if (COL_SITE in dfn.columns) and (COL_TICKETS_REDEEMED in dfn.columns):
+        try:
+            r = dfn.copy()
+            r["Tickets Redeemed (Abs)"] = r[COL_TICKETS_REDEEMED].abs()
+            r_agg = (
+                r.groupby(COL_SITE, dropna=False)["Tickets Redeemed (Abs)"]
+                .sum()
+                .reset_index()
+                .rename(columns={"Tickets Redeemed (Abs)": "Total Tickets Redeemed"})
+            )
+            r_agg["Sheet"] = sn
+            site_redeemed_frames.append(r_agg)
+        except Exception:
+            pass
+
+# Combine frames across sheets
+def combine_and_sum(frames: List[pd.DataFrame], key_col: str, sum_col: str) -> pd.DataFrame:
+    if not frames:
+        return pd.DataFrame(columns=[key_col, sum_col])
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.groupby(key_col, dropna=False)[sum_col].sum().reset_index()
+    combined = combined.sort_values(sum_col, ascending=False).reset_index(drop=True)
+    return combined
+
+combined_topup = combine_and_sum(site_topup_frames, COL_SITE, "Total Top Up (IDR)")
+combined_tickets = combine_and_sum(site_tickets_frames, COL_SITE, "Total Tickets Inflow")
+combined_redeemed = combine_and_sum(site_redeemed_frames, COL_SITE, "Total Tickets Redeemed")
+
+# Display results (tables + charts) — REPLACE the existing expander block with this
+with st.expander(f"📈 Cross-Sheet Charts — Top {top_k_sets} Activity Sites"):
+    import plotly.express as px
+
+    # tooltips text for cross-sheet charts
+    topup_tooltip_cross = "Cabang tempat pelanggan melakukan top-up, walaupun kartu mereka dibuat di cabang lain."
+    tickets_tooltip_cross = "Cabang tempat pelanggan menerima tiket, meski kartu mereka dibuat di cabang lain."
+    redeem_tooltip_cross = "Cabang tempat pelanggan menukarkan tiket, walaupun kartu mereka berasal dari cabang lain."
+
+
+
+    # Helper to show table + chart + download for one metric WITH tooltip header
+    def show_metric_table_and_chart_with_tooltip(df_metric: pd.DataFrame, site_col: str, metric_col: str, title: str, tooltip: str, key: str = None):
+        if df_metric.empty:
+            st.info(f"No data available for **{title}**.")
+            return
+
+        # header with tooltip
+        st.markdown(
+            f'<div style="font-weight:600; display:flex; align-items:center; gap:6px;">'
+            f'{title} <span title="{tooltip}" style="cursor:help;">ℹ️</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Safe copy and ensure metric_col exists
+        if metric_col not in df_metric.columns:
+            st.warning(f"Metric column '{metric_col}' not found for {title}.")
+            return
+
+        df_display = format_dataframe_columns(df_metric.head(top_k_sets), {metric_col: 0})
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        # Bar chart (horizontal)
+        fig = px.bar(
+            df_metric.head(top_k_sets).copy(),
+            x=metric_col,
+            y=site_col,
+            orientation="h",
+            title="",
+            text=metric_col,
+        )
+        fig.update_layout(xaxis_title=metric_col, yaxis_title="Activity Site", yaxis={"categoryorder":"total ascending"})
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Download CSV
+        csv_bytes = df_metric.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            f"⬇️ Download {title} (all sites)",
+            data=csv_bytes,
+            file_name=f"{title.lower().replace(' ','_')}_all_sites.csv",
+            mime="text/csv",
+            key=key,
+        )
+
+    col_a, col_b, col_c = st.columns(3)
+
+    with col_a:
+        show_metric_table_and_chart_with_tooltip(
+            combined_topup,
+            COL_SITE,
+            "Total Top Up (IDR)",
+            f"Top Topup per Activity Site — Top {top_k_sets} (cross-branch)",
+            topup_tooltip_cross,
+            key="cross_sheet_topup",
+        )
+
+    with col_b:
+        show_metric_table_and_chart_with_tooltip(
+            combined_tickets,
+            COL_SITE,
+            "Total Tickets Inflow",
+            f"Top Tickets Inflow per Activity Site — Top {top_k_sets} (cross-branch)",
+            tickets_tooltip_cross,
+            key="cross_sheet_tickets",
+        )
+
+    with col_c:
+        show_metric_table_and_chart_with_tooltip(
+            combined_redeemed,
+            COL_SITE,
+            "Total Tickets Redeemed",
+            f"Tickets Redeemed per Activity Site — Top {top_k_sets} (cross-branch)",
+            redeem_tooltip_cross,
+            key="cross_sheet_redeemed",
+        )
+
+
+# --- Cross-branch analysis (all sheets combined)
+# concat semua prepared sheets menjadi satu DF global
+all_df = pd.concat([df for df in prepared_per_sheet.values() if df is not None], ignore_index=True) if prepared_per_sheet else pd.DataFrame()
+
+# normalisasi nama kolom (pastikan tersedia)
+for c in [COL_STORE, COL_SITE, COL_AMOUNT, COL_TICKETS_EARNED, COL_REDEEM_LOADED, COL_MANUAL_LOADED, COL_TICKETS_REDEEMED, COL_DATE, COL_CARDNO]:
+    if c not in all_df.columns:
+        # create empty col to avoid KeyErrors later
+        all_df[c] = np.nan
+
+# convert to proper dtypes (prepare_dataframe already did per sheet, but safe)
+_to_numeric_safe(all_df, ["Amount", "Tickets Redeemed", "Loyalty Points",
+                          "Tickets Earned", "Redemption Currency Loaded",
+                          "Tickets Manually Loaded", "Tickets Loaded Via TicketReceipts",
+                          "Tickets Loaded Via Transaction"])
+
+# Define cross-branch flag (ignore case + trim)
+all_df["Card_Issued_Store_clean"] = all_df[COL_STORE].astype(str).str.strip()
+all_df["Activity_Site_clean"] = all_df[COL_SITE].astype(str).str.strip()
+all_df["is_cross_branch"] = (
+    (~all_df["Card_Issued_Store_clean"].isna())
+    & (~all_df["Activity_Site_clean"].isna())
+    & (all_df["Card_Issued_Store_clean"] != all_df["Activity_Site_clean"])
+)
+
+# Aggregate metrics for cross-branch only
+cross_df = all_df[all_df["is_cross_branch"] == True].copy()
+
+# ticket cols present (global)
+ticket_cols_present = [c for c in TICKET_COLS_ALL if c in cross_df.columns]
+
+# KPI summary
+total_cards = int(all_df[COL_CARDNO].nunique()) if COL_CARDNO in all_df.columns else int(all_df["Card Number"].nunique())
+cards_with_cross = int(cross_df[COL_CARDNO].nunique()) if COL_CARDNO in cross_df.columns else int(cross_df["Card Number"].nunique())
+pct_cards_cross = 100.0 * cards_with_cross / total_cards if total_cards > 0 else np.nan
+total_topup_cross = float(cross_df["Amount"].sum()) if "Amount" in cross_df.columns else 0.0
+total_tickets_cross = float(cross_df[ticket_cols_present].sum().sum()) if ticket_cols_present else 0.0
+
+# Top origin stores by outbound cross-branch topup (Top 20)
+outbound = (
+    cross_df.groupby("Card_Issued_Store_clean", dropna=False)["Amount"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Amount": "Total Outbound TopUp (IDR)", "Card_Issued_Store_clean": "Origin Store"})
+    .sort_values("Total Outbound TopUp (IDR)", ascending=False)
+)
+# Top destinations (where non-local cards topup)
+inbound_sites = (
+    cross_df.groupby("Activity_Site_clean", dropna=False)["Amount"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Amount": "Total Inbound TopUp (IDR)", "Activity_Site_clean": "Activity Site"})
+    .sort_values("Total Inbound TopUp (IDR)", ascending=False)
+)
+
+# Top tickets inflow cross-branch by destination
+if ticket_cols_present:
+    cross_df["Total Tickets Inflow"] = cross_df[ticket_cols_present].sum(axis=1)
+else:
+    cross_df["Total Tickets Inflow"] = 0
+tickets_by_site = (
+    cross_df.groupby("Activity_Site_clean", dropna=False)["Total Tickets Inflow"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Total Tickets Inflow": "Total Tickets Inflow (cross-branch)", "Activity_Site_clean": "Activity Site"})
+    .sort_values("Total Tickets Inflow (cross-branch)", ascending=False)
+)
+
+# Tickets redeemed by destination (abs)
+cross_df["Tickets Redeemed Abs"] = cross_df[COL_TICKETS_REDEEMED].abs()
+redeemed_by_site = (
+    cross_df.groupby("Activity_Site_clean", dropna=False)["Tickets Redeemed Abs"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Tickets Redeemed Abs": "Total Tickets Redeemed (cross-branch)", "Activity_Site_clean": "Activity Site"})
+    .sort_values("Total Tickets Redeemed (cross-branch)", ascending=False)
+)
+
+# ---------------------------
+# Cross-branch flows, top sites and Sankey (replacement block)
+# ---------------------------
+
+# safety: ensure cross_df exists
+if "cross_df" not in locals():
+    cross_df = pd.DataFrame()
+
+# Top N for flows
+topN = int(top_k_sets) if "top_k_sets" in locals() else 20
+
+# Build flow dataframe (Origin -> Destination) by Amount (cross-branch)
+flow_df = (
+    cross_df.groupby(["Card_Issued_Store_clean", "Activity_Site_clean"], dropna=False)["Amount"]
+    .sum()
+    .reset_index()
+    .rename(columns={
+        "Card_Issued_Store_clean": "Origin",
+        "Activity_Site_clean": "Destination",
+        "Amount": "Value",
+    })
+)
+flow_df = flow_df.sort_values("Value", ascending=False).head(500)  # cap to keep chart responsive
+
+# Top destinations (inbound topup)
+inbound_sites = (
+    cross_df.groupby("Activity_Site_clean", dropna=False)["Amount"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Activity_Site_clean": "Activity Site", "Amount": "Total Inbound TopUp (IDR)"})
+    .sort_values("Total Inbound TopUp (IDR)", ascending=False)
+)
+
+# Top tickets inflow per destination (cross-branch)
+ticket_cols_present = [c for c in TICKET_COLS_ALL if c in cross_df.columns]
+if ticket_cols_present:
+    cross_df["Total Tickets Inflow (cross-branch)"] = cross_df[ticket_cols_present].sum(axis=1)
+else:
+    cross_df["Total Tickets Inflow (cross-branch)"] = 0
+
+tickets_by_site = (
+    cross_df.groupby("Activity_Site_clean", dropna=False)["Total Tickets Inflow (cross-branch)"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Activity_Site_clean": "Activity Site"})
+    .sort_values("Total Tickets Inflow (cross-branch)", ascending=False)
+)
+
+# Tickets redeemed by destination (abs)
+if COL_TICKETS_REDEEMED in cross_df.columns:
+    cross_df["Tickets Redeemed Abs"] = cross_df[COL_TICKETS_REDEEMED].abs()
+else:
+    cross_df["Tickets Redeemed Abs"] = 0
+
+redeemed_by_site = (
+    cross_df.groupby("Activity_Site_clean", dropna=False)["Tickets Redeemed Abs"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Activity_Site_clean": "Activity Site", "Tickets Redeemed Abs": "Total Tickets Redeemed (cross-branch)"})
+    .sort_values("Total Tickets Redeemed (cross-branch)", ascending=False)
+)
+
+# ---------------------------
+# KPIs (reuse existing tooltip renderer if present)
+# ---------------------------
+st.markdown("---")
+st.subheader("🌐 Cross-Branch Overview (All Sheets)")
+
+# if helper _label_with_tooltip exists use it; otherwise define local fallback
+if "_label_with_tooltip" in globals():
+    _lab = _label_with_tooltip
+else:
+    def _lab(label: str, tooltip: str):
+        html = (
+            f'<div style="font-weight:600; display:flex; align-items:center; gap:6px;">'
+            f'{label} <span title="{tooltip}" style="cursor:help;">ℹ️</span>'
+            f'</div>'
+        )
+        st.markdown(html, unsafe_allow_html=True)
+
+tt_unique = "Jumlah kartu berbeda yang ditemukan di semua data yang diupload."
+tt_cross_cards = "Jumlah kartu yang pernah beraktivitas di cabang lain, bukan di cabang tempat kartu dibuat."
+tt_topup = "Total uang top-up yang dilakukan pelanggan di cabang lain, bukan cabang tempat kartu dibuat."
+tt_tickets = "Total tiket yang diterima pelanggan di cabang lain, bukan cabang tempat kartu dibuat."
+
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    _lab("Unique cards processed", tt_unique)
+    st.metric(label="", value=f"{total_cards:,}")
+with k2:
+    _lab("Cards with any cross-branch activity", tt_cross_cards)
+    pct_text = f" ({pct_cards_cross:.2f}%)" if not pd.isna(pct_cards_cross) else ""
+    st.metric(label="", value=f"{cards_with_cross:,}{pct_text}")
+with k3:
+    _lab("Total Top Up (cross-branch)", tt_topup)
+    st.metric(label="", value=f"Rp {total_topup_cross:,.0f}")
+with k4:
+    _lab("Total Tickets Inflow (cross-branch)", tt_tickets)
+    st.metric(label="", value=f"{total_tickets_cross:,.0f}")
+
+# ---------------------------
+# Cross-Sheet Top-N charts with tooltips
+# ---------------------------
+with st.expander(f"📊 Cross-Branch Top {topN} (Topup / Tickets / Redeem)"):
+    import plotly.express as px
+
+    # helper
+    def _show_top_table_chart(df_metric: pd.DataFrame, metric_col: str, title: str, tooltip: str, key: str = None):
+        if df_metric is None or df_metric.empty:
+            st.info(f"No data for {title}")
+            return
+        # header + tooltip
+        st.markdown(
+            f'<div style="font-weight:600; display:flex; align-items:center; gap:6px;">'
+            f'{title} <span title="{tooltip}" style="cursor:help;">ℹ️</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        df_display = df_metric.head(topN).copy()
+        # format numeric column if present
+        if metric_col in df_display.columns:
+            df_display = format_dataframe_columns(df_display, {metric_col: 0})
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        # chart
+        fig = px.bar(
+            df_metric.head(topN).copy(),
+            x=metric_col,
+            y="Activity Site",
+            orientation="h",
+            text=metric_col,
+            title="",
+        )
+        fig.update_layout(yaxis={"categoryorder":"total ascending"})
+        st.plotly_chart(fig, use_container_width=True)
+
+        # download
+        csv_bytes = df_metric.to_csv(index=False).encode("utf-8")
+        st.download_button(f"⬇️ Download {title} (all sites)", data=csv_bytes, file_name=f"{title.lower().replace(' ','_')}_all_sites.csv", mime="text/csv", key=key)
+
+    col_a, col_b, col_c = st.columns(3)
+
+    with col_a:
+        _show_top_table_chart(inbound_sites.rename(columns={"Activity Site": "Activity Site"}), "Total Inbound TopUp (IDR)", f"Top Topup per Activity Site — Top {topN} (cross-branch)", "Cabang tujuan (Activity Site) yang menerima top-up terbesar dari kartu non-local.", key="cross_branch_topup")
+    with col_b:
+        _show_top_table_chart(tickets_by_site.rename(columns={"Activity Site": "Activity Site"}), "Total Tickets Inflow (cross-branch)", f"Top Tickets Inflow per Activity Site — Top {topN} (cross-branch)", "Cabang tujuan dengan Tickets Inflow teratas dari kartu non-local.", key="cross_branch_tickets")
+    with col_c:
+        _show_top_table_chart(redeemed_by_site.rename(columns={"Activity Site": "Activity Site"}), "Total Tickets Redeemed (cross-branch)", f"Tickets Redeemed per Activity Site — Top {topN} (cross-branch)", "Cabang tujuan dengan redeem tiket terbanyak oleh kartu non-local.", key="cross_branch_redeemed")
+
+# quick summary
+st.write(f"- Unique cards processed: **{total_cards:,}**")
+st.write(f"- Cards with any cross-branch activity: **{cards_with_cross:,}** ({pct_cards_cross:.2f}%)")
+st.write(f"- Total Top Up (cross-branch): **{total_topup_cross:,.0f} IDR**")
+st.write(f"- Total Tickets Inflow (cross-branch): **{total_tickets_cross:,.0f}**")
+
+# ---------------------------
+# Sankey (Flow) with tooltip header
+# ---------------------------
+if not flow_df.empty:
+    import plotly.graph_objects as go
+
+    sankey_tooltip = "Diagram ini menunjukkan aliran top-up dari cabang tempat kartu dibuat ke cabang tempat pelanggan melakukan top-up."
+
+    st.markdown(
+        f'<div style="font-weight:600; display:flex; align-items:center; gap:6px;">'
+        f'Flow: Card Issued Store → Activity Site (by Topup IDR) <span title="{sankey_tooltip}" style="cursor:help;">ℹ️</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    labels = list(pd.unique(flow_df[["Origin", "Destination"]].values.ravel()))
+    label_to_idx = {l: i for i, l in enumerate(labels)}
+    sankey_source = flow_df["Origin"].map(label_to_idx).tolist()
+    sankey_target = flow_df["Destination"].map(label_to_idx).tolist()
+    sankey_value = flow_df["Value"].tolist()
+
+    fig_sankey = go.Figure(
+        data=go.Sankey(
+            node=dict(label=labels, pad=15, thickness=15),
+            link=dict(source=sankey_source, target=sankey_target, value=sankey_value),
+        )
+    )
+    fig_sankey.update_layout(title_text="Flow: Card Issued Store → Activity Site (by Topup IDR)", height=600)
+    st.plotly_chart(fig_sankey, use_container_width=True)
+else:
+    st.info("No cross-branch flow data available for Sankey.")
+
+
+# Per-card sample (top offenders)
+# st.markdown("---")
+# st.markdown("**Per-card sample (top offenders by amount_cross_branch)**")
+# if not card_agg.empty:
+#     st.dataframe(
+#         format_dataframe_columns(
+#             card_agg[["Card Number", "n_tx_total", "n_tx_cross_branch", "amount_total", "amount_cross_branch", "tickets_total", "pct_cross_branch"]].fillna(0),
+#             {"amount_total": 0, "amount_cross_branch": 0, "pct_cross_branch": 2, "tickets_total": 0},
+#         ),
+#         use_container_width=True,
+#         hide_index=True,
+#     )
+# else:
+#     st.info("No per-card data available.")
 
 # ===========================
 # Faux "clickable row": render Open ▶ buttons
@@ -1146,9 +1588,25 @@ with st.expander("🧭 Interactive Charts (Plotly)"):
     st.plotly_chart(fig_pie, use_container_width=True)
 
 # ===========================
-# Top Tickets Inflow per Activity Site
+# Top Tickets Inflow per Activity Site (single sheet) — with tooltip
 # ===========================
 st.subheader("🏆 Top Tickets Inflow per Activity Site")
+
+_tt_top_tickets = (
+    "Cabang yang menerima jumlah Tickets Inflow terbesar untuk kartu pada sheet ini. "
+    "Tickets Inflow dihitung sebagai penjumlahan kolom Tickets Earned, Redemption Currency Loaded, "
+    "Tickets Manually Loaded, Tickets Loaded Via TicketReceipts, Tickets Loaded Via Transaction."
+)
+
+# small helper for inline tooltip label (kept local to this block)
+def _inline_label_with_tooltip(text: str, tooltip: str):
+    st.markdown(
+        f'<div style="font-weight:600; display:flex; align-items:center; gap:8px;">'
+        f'{text} <span title="{tooltip}" style="cursor:help;">ℹ️</span></div>',
+        unsafe_allow_html=True,
+    )
+
+_inline_label_with_tooltip("Top Tickets Inflow per Activity Site", _tt_top_tickets)
 st.caption(f"**Card Issued Store:** {card_store or '—'}")
 
 if COL_SITE in df.columns:
@@ -1179,14 +1637,67 @@ if COL_SITE in df.columns:
         mime="text/csv",
     )
 else:
-    st.info(
-        "Column 'Activity Site' not found."
-    )
+    st.info("Column 'Activity Site' not found.")
+
 
 # ===========================
-# Tickets Redeemed per Activity Site
+# Top Topup per Activity Site (single sheet) — with tooltip
+# ===========================
+st.subheader("💸 Top Topup per Activity Site")
+
+_tt_top_topup = (
+    "Cabang yang menerima nilai top-up (Amount) terbesar untuk kartu pada sheet ini. "
+    "Dihitung SUM(Amount) per Activity Site."
+)
+
+_inline_label_with_tooltip("Top Topup per Activity Site", _tt_top_topup)
+st.caption(f"**Card Issued Store:** {card_store or '—'}")
+
+if COL_SITE in df.columns and COL_AMOUNT in df.columns:
+    try:
+        site_topup = (
+            df.groupby(COL_SITE, dropna=False)[COL_AMOUNT]
+            .sum()
+            .reset_index()
+            .rename(columns={COL_AMOUNT: "Total Top Up (IDR)"})
+        )
+        site_topup = site_topup.sort_values("Total Top Up (IDR)", ascending=False)
+
+        site_topup_display = format_dataframe_columns(
+            site_topup, {"Total Top Up (IDR)": 0}
+        )
+
+        st.dataframe(
+            site_topup_display,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        csv_site_topup = site_topup.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            f"⬇️ Download Top Topup per Activity Site ({selected_sheet})",
+            data=csv_site_topup,
+            file_name=f"top_topup_site_{selected_sheet}.csv",
+            mime="text/csv",
+        )
+    except Exception as e:
+        st.warning(f"Top Topup per Activity Site unavailable: {e}")
+else:
+    st.info("Column 'Activity Site' or 'Amount' not found.")
+
+
+
+# ===========================
+# Tickets Redeemed per Activity Site (single sheet) — with tooltip
 # ===========================
 st.subheader("🎟️ Tickets Redeemed per Activity Site")
+
+_tt_redeem = (
+    "Cabang tempat redeem (penukaran tiket) terbesar terjadi untuk kartu pada sheet ini. "
+    "Dihitung SUM(abs(Tickets Redeemed)) per Activity Site."
+)
+
+_inline_label_with_tooltip("Tickets Redeemed per Activity Site", _tt_redeem)
 st.caption(f"**Card Issued Store:** {card_store or '—'}")
 
 if COL_SITE in df.columns and COL_TICKETS_REDEEMED in df.columns:
@@ -1221,7 +1732,8 @@ if COL_SITE in df.columns and COL_TICKETS_REDEEMED in df.columns:
         mime="text/csv",
     )
 else:
-    "Column 'Activity Site' not found."
+    st.info("Column 'Activity Site' not found.")
+
 
 
 # ===========================
