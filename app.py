@@ -370,6 +370,16 @@ def _decide_flag(value: float, th_fraud: float, th_potential: float) -> str:
         return "Potential Fraud"
     return "Normal"
 
+def _decide_flag_cost_index(value: float, th_potential: float, th_fraud: float) -> str:
+    if pd.isna(value):
+        return "N/A"
+    if value >= th_fraud:
+        return "Fraud"
+    if value > th_potential:
+        return "Potential Fraud"
+    return "Normal"
+
+
 
 def compute_overall_log(
     df: pd.DataFrame,
@@ -418,7 +428,11 @@ def compute_overall_log(
         value_eff_pct = (total_tickets / total_topup) * 100
     else:
         value_eff_pct = np.nan
-    flag_eff = _decide_flag(value_eff_pct, th_eff_fraud, th_eff_potential)
+    flag_eff = _decide_flag_cost_index(
+        value_eff_pct,
+        th_potential=th_eff_potential,
+        th_fraud=th_eff_fraud,
+    )
 
     earned_total = (
         float(df[COL_TICKETS_EARNED].sum()) if COL_TICKETS_EARNED in df.columns else 0.0
@@ -661,14 +675,14 @@ with st.sidebar.expander("🚨 Fraud Thresholds (IDR / ticket & Cost Index %)"):
         "IDR/ticket: Potential Fraud upper bound", min_value=0.0, value=40.0, step=1.0
     )
     th_eff_fraud = st.number_input(
-        "Cost Index (%): mark as Fraud if < this value",
+        "Cost Index (%): mark as Fraud if > this value",
         min_value=0.0,
         value=20.0,
         step=50.0,
         help="Cost Index = (Total Tickets / Total Top Up ) × 100",
     )
     th_eff_potential = st.number_input(
-        "Cost Index (%): Potential Fraud upper bound",
+        "Cost Index (%): Potential Fraud lower bound",
         min_value=0.0,
         value=40.0,
         step=50.0,
@@ -1457,7 +1471,8 @@ with st.expander("Why is it flagged? (numbers vs thresholds)"):
     st.write(
         f"- **Cost Index % (actual):** "
         f"{'NaN' if pd.isna(overall['value_eff_pct']) else format_number(overall['value_eff_pct'], 2) + '%'}  "
-        f"→ Fraud if **< {overall['th_eff_fraud']:,.0f}%**, Potential if **≤ {overall['th_eff_potential']:,.0f}%**"
+        f"→ Fraud if **≥ {overall['th_eff_fraud']:,.0f}%**, "
+        f"Potential if **> {overall['th_eff_potential']:,.0f}%**"
     )
     st.caption("Tip: Tweak thresholds in the sidebar if the flagging feels too strict.")
 
