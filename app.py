@@ -370,14 +370,22 @@ def _decide_flag(value: float, th_fraud: float, th_potential: float) -> str:
         return "Potential Fraud"
     return "Normal"
 
-def _decide_flag_cost_index(value: float, th_potential: float, th_fraud: float) -> str:
+def _decide_flag_cost_index(
+    value: float,
+    th_potential: float,
+    th_fraud: float,
+) -> str:
     if pd.isna(value):
         return "N/A"
+
     if value >= th_fraud:
         return "Fraud"
+
     if value > th_potential:
         return "Potential Fraud"
+
     return "Normal"
+
 
 
 
@@ -675,19 +683,20 @@ with st.sidebar.expander("🚨 Fraud Thresholds (IDR / ticket & Cost Index %)"):
         "IDR/ticket: Potential Fraud upper bound", min_value=0.0, value=40.0, step=1.0
     )
     th_eff_fraud = st.number_input(
-        "Cost Index (%): mark as Fraud if > this value",
+        "Cost Index (%): mark as Fraud if ≥ this value",
         min_value=0.0,
         value=20.0,
-        step=50.0,
-        help="Cost Index = (Total Tickets / Total Top Up ) × 100",
+        step=1.0,
+        help="Cost Index = (Total Tickets / Total Top Up) × 100. Semakin tinggi → semakin berisiko."
     )
     th_eff_potential = st.number_input(
         "Cost Index (%): Potential Fraud lower bound",
         min_value=0.0,
-        value=40.0,
-        step=50.0,
+        value=7.0,
+        step=1.0,
+        help="Jika Cost Index > nilai ini dan < Fraud threshold, maka Potential Fraud."
     )
-    top_k_sets = st.slider(
+top_k_sets = st.slider(
         "Top-K Sets for charts", min_value=5, max_value=50, value=20, step=1
     )
 
@@ -1428,7 +1437,7 @@ c7.metric(
         if pd.isna(overall["value_eff_pct"])
         else f"{overall['value_eff_pct']:,.2f}%"
     ),
-    help="(Total Top Up ÷ Total Tickets Inflow) × 100",
+    help="Cost Index = (Total Tickets ÷ Total Top Up) × 100. Semakin tinggi -> makin berisiko."
 )
 
 if overall["ticket_left"] < 0:
