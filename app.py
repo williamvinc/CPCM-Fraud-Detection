@@ -361,14 +361,13 @@ def build_cashier_activity_table(
     return agg_cashier
 
 
-def _decide_flag(value: float, th_fraud: float, th_potential: float) -> str:
+def _decide_flag_idr_per_ticket(value: float) -> str:
     if pd.isna(value):
         return "N/A"
-    if value < th_fraud:
+    if value < 7.5:
         return "Fraud"
-    if th_fraud <= value <= th_potential:
-        return "Potential Fraud"
     return "Normal"
+
 
 def _decide_flag_cost_index(
     value: float,
@@ -398,8 +397,6 @@ def compute_overall_log(
     COL_TICKETS_EARNED: str,
     COL_REDEEM_LOADED: str,
     COL_MANUAL_LOADED: str,
-    th_fraud: float,
-    th_potential: float,
     th_eff_fraud: float,
     th_eff_potential: float,
 ) -> Dict[str, Any]:
@@ -430,7 +427,7 @@ def compute_overall_log(
         topup_count = 0
 
     idr_per_ticket = (total_topup / total_tickets) if total_tickets > 0 else np.nan
-    flag = _decide_flag(idr_per_ticket, th_fraud, th_potential)
+    flag = _decide_flag_idr_per_ticket(idr_per_ticket)
 
     if total_topup > 0:
         value_eff_pct = (total_tickets / total_topup) * 100
@@ -480,8 +477,6 @@ def compute_overall_log(
         "flag_eff": flag_eff,
         "assumption": assumption,
         "redeemed_sign_fixed": redeemed_sign_fixed,
-        "th_fraud": th_fraud,
-        "th_potential": th_potential,
         "th_eff_fraud": th_eff_fraud,
         "th_eff_potential": th_eff_potential,
     }
@@ -621,7 +616,7 @@ def prepare_dataframe(df: pd.DataFrame, colmap: Dict[str, str]) -> pd.DataFrame:
 # ===========================
 require_login()
 
-st.sidebar.title("Controls")
+# st.sidebar.title("Controls")
 
 if st.sidebar.button("Log out"):
     st.session_state.pop(AUTH_SESSION_KEY, None)
@@ -676,12 +671,6 @@ if uploaded is not None:
 
 # Fraud threshold tuners
 with st.sidebar.expander("🚨 Fraud Thresholds (IDR / ticket & Cost Index %)"):
-    th_fraud = st.number_input(
-        "IDR/ticket: mark as Fraud if < this value", min_value=0.0, value=20.0, step=1.0
-    )
-    th_potential = st.number_input(
-        "IDR/ticket: Potential Fraud upper bound", min_value=0.0, value=40.0, step=1.0
-    )
     th_eff_fraud = st.number_input(
         "Cost Index (%): mark as Fraud if ≥ this value",
         min_value=0.0,
@@ -697,7 +686,7 @@ with st.sidebar.expander("🚨 Fraud Thresholds (IDR / ticket & Cost Index %)"):
         help="Jika Cost Index > nilai ini dan < Fraud threshold, maka Potential Fraud."
     )
 top_k_sets = st.slider(
-        "Top-K Sets for charts", min_value=5, max_value=50, value=20, step=1
+        "Top-K Sets for charts", min_value=5, max_value=50, value=10, step=1
     )
 
 # Session state for drilldown
@@ -798,8 +787,6 @@ for sn in digit_sheet_names:
             COL_TICKETS_EARNED=COL_TICKETS_EARNED,
             COL_REDEEM_LOADED=COL_REDEEM_LOADED,
             COL_MANUAL_LOADED=COL_MANUAL_LOADED,
-            th_fraud=th_fraud,
-            th_potential=th_potential,
             th_eff_fraud=th_eff_fraud,
             th_eff_potential=th_eff_potential,
         )
@@ -1400,8 +1387,6 @@ overall = compute_overall_log(
     COL_TICKETS_EARNED=COL_TICKETS_EARNED,
     COL_REDEEM_LOADED=COL_REDEEM_LOADED,
     COL_MANUAL_LOADED=COL_MANUAL_LOADED,
-    th_fraud=th_fraud,
-    th_potential=th_potential,
     th_eff_fraud=th_eff_fraud,
     th_eff_potential=th_eff_potential,
 )
@@ -1475,7 +1460,6 @@ with st.expander("Why is it flagged? (numbers vs thresholds)"):
     st.write(
         f"- **IDR/ticket (actual):** "
         f"{'NaN' if pd.isna(overall['idr_per_ticket']) else format_number(overall['idr_per_ticket'], 2)}  "
-        f"→ Fraud if **< {overall['th_fraud']:,.2f}**, Potential if **≤ {overall['th_potential']:,.2f}**"
     )
     st.write(
         f"- **Cost Index % (actual):** "
