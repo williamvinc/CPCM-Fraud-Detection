@@ -180,7 +180,7 @@ def get_username_col(
 
 def _to_datetime_safe(df: pd.DataFrame, col: str) -> None:
     if col in df.columns:
-        df[col] = pd.to_datetime(df[col], errors="coerce")
+        df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
 
 
 def _to_numeric_safe(df: pd.DataFrame, cols: list[str]) -> None:
@@ -572,6 +572,67 @@ def read_excel_like(
 
 
 @st.cache_data(show_spinner=False)
+def read_csv_like(upload: bytes) -> Dict[str, pd.DataFrame]:
+    """
+    Read a CSV file and group by Customer Name to create pseudo-sheets.
+    Returns dict where keys are unique Customer Name values.
+    """
+    bio = BytesIO(upload)
+    df_all = pd.read_csv(bio)
+    
+    # Rename underscore columns to space-based naming (for compatibility with existing logic)
+    col_rename = {
+        "Card_Issued_Store": "Card Issued Store",
+        "Activity_Site": "Activity Site",
+        "Customer_Name": "Customer Name",
+        "Phone_Number": "Phone Number",
+        "Card_No": "Card Number",
+        "Date_of_Activity": "Date of Activity",
+        "Tickets_Earned": "Tickets Earned",
+        "Tickets_Manually_Loaded": "Tickets Manually Loaded",
+        "Tickets_Loaded_via_TicketReceipts": "Tickets Loaded Via TicketReceipts",
+        "Tickets_Loaded_Via_Transaction": "Tickets Loaded Via Transaction",
+        "Loyalty_Points": "Loyalty Points",
+        "Tickets_Redeemed": "Tickets Redeemed",
+        "Redemption_Currency_Loaded": "Redemption Currency Loaded",
+        "Activity_Type": "ActivityType",
+        "Product_Game_Name": "Product / Game Name",
+        # Additional potential column names
+        "Total_Ticket_Loaded": "Total Tickets Loaded",
+    }
+    df_all = df_all.rename(columns=col_rename)
+    
+    # Ensure all required ticket columns exist (fill with 0 if missing)
+    required_ticket_cols = [
+        "Tickets Earned",
+        "Redemption Currency Loaded", 
+        "Tickets Manually Loaded",
+        "Tickets Loaded Via TicketReceipts",
+        "Tickets Loaded Via Transaction",
+        "Tickets Redeemed",
+        "Loyalty Points",
+        "Amount",
+    ]
+    for col in required_ticket_cols:
+        if col not in df_all.columns:
+            df_all[col] = 0
+    
+    # Group by Customer Name - each unique customer becomes a "sheet"
+    customer_col = "Customer Name"
+    grouped: Dict[str, pd.DataFrame] = {}
+    
+    if customer_col in df_all.columns:
+        for cust_name, cust_df in df_all.groupby(customer_col, dropna=False):
+            sheet_key = str(cust_name) if pd.notna(cust_name) else "Unknown"
+            grouped[sheet_key] = cust_df.reset_index(drop=True)
+    else:
+        # Fallback: treat the entire CSV as one "sheet"
+        grouped["All Data"] = df_all.reset_index(drop=True)
+    
+    return grouped
+
+
+@st.cache_data(show_spinner=False)
 def prepare_dataframe(df: pd.DataFrame, colmap: Dict[str, str]) -> pd.DataFrame:
     """Normalize column names, coerce types, and drop suspicious rows."""
     dfx = normalize_columns(df, colmap)
@@ -627,8 +688,8 @@ if st.session_state.get(AUTH_SESSION_KEY, False):
     st.sidebar.caption("Hi There!")
 
 uploaded = st.sidebar.file_uploader(
-    "Upload spreadsheet (.ods, .xlsx, .xlsm, .xls)",
-    type=["ods", "xlsx", "xlsm", "xls"],
+    "Upload spreadsheet (.csv, .ods, .xlsx, .xlsm, .xls)",
+    type=["csv", "ods", "xlsx", "xlsm", "xls"],
 )
 
 sheet_name_choice = None
@@ -636,9 +697,13 @@ colmap = DEFAULT_COLS.copy()
 
 if uploaded is not None:
     suffix = Path(uploaded.name).suffix.lower()
+    is_csv_upload = suffix == ".csv"
     engine_hint = "odf" if suffix == ".ods" else None
     try:
-        all_sheets_preview = read_excel_like(uploaded.getvalue(), engine_hint)
+        if is_csv_upload:
+            all_sheets_preview = read_csv_like(uploaded.getvalue())
+        else:
+            all_sheets_preview = read_excel_like(uploaded.getvalue(), engine_hint)
         sheet_names_preview = list(all_sheets_preview.keys())
 
         # Show one sample sheet to help map columns
@@ -698,9 +763,9 @@ if "selected_sheet" not in st.session_state:
 # ===========================
 st.title("CPCM — Ticket Fraud Analysis")
 st.markdown(
-    "Upload your arcade transaction file (ODS/Excel). The app will:\n"
-    "1) **Auto-scan all sheets whose names start with a digit** (e.g., `1CZ`, `8.1 CZ`, `1PV`).\n"
-    "2) **Build a summary per sheet** → click **Open ▶** to see **details** identical to the single-sheet view.\n"
+    "Upload your arcade transaction file (CSV/ODS/Excel). The app will:\n"
+    "1) **Group data by Customer Name** (for CSV) or **scan sheets starting with a digit** (for Excel).\n"
+    "2) **Build a summary per customer** → click **Open ▶** to see **details**.\n"
 )
 
 # ===========================
@@ -710,16 +775,21 @@ if uploaded is None:
     st.info("⬆️ Please upload a file to begin.")
     st.stop()
 
-# Read all sheets (cached)
-all_sheets = read_excel_like(
-    uploaded.getvalue(), "odf" if uploaded.name.lower().endswith(".ods") else None
-)
-
-# Keep only sheet names that start with a digit
-digit_sheet_names = [sn for sn in all_sheets.keys() if re.match(r"^\s*\d", str(sn))]
+# Read all sheets / customers (cached)
+is_csv = uploaded.name.lower().endswith(".csv")
+if is_csv:
+    all_sheets = read_csv_like(uploaded.getvalue())
+    # For CSV, use all customer names as "sheet" names
+    digit_sheet_names = list(all_sheets.keys())
+else:
+    all_sheets = read_excel_like(
+        uploaded.getvalue(), "odf" if uploaded.name.lower().endswith(".ods") else None
+    )
+    # Keep only sheet names that start with a digit
+    digit_sheet_names = [sn for sn in all_sheets.keys() if re.match(r"^\s*\d", str(sn))]
 
 if not digit_sheet_names:
-    st.warning("No sheets found that start with a digit. Please check the sheet names.")
+    st.warning("No customers/sheets found. Please check the file format.")
     st.stop()
 
 # ===========================
@@ -794,14 +864,14 @@ for sn in digit_sheet_names:
         summary_rows.append(
             {
                 "Card Number": card_no or "—",
-                "Customer Name": cust_name or "—",
+                "Customer Name": cust_name or sn,  # fallback to sheet name (customer name from CSV grouping)
                 "Card Issued Store": card_store or "—",
                 "IDR per Ticket": overall["idr_per_ticket"],
                 "Cost Index (%)": overall["value_eff_pct"],
                 "Flagging (IDR/Ticket)": _flag_emoji(overall["flag"]),
                 "Cost Index Flag": _flag_emoji(overall["flag_eff"]),
                 "Phone Number": phone_num or "—",
-                "Sheet": sn,
+                "_sheet_key": sn,  # hidden key for selection
                 "Total Top Up (IDR)": overall["total_topup"],
                 "Top Up Count": overall["topup_count"],
                 "Total Tickets Inflow": overall["total_tickets"],
@@ -813,14 +883,14 @@ for sn in digit_sheet_names:
         summary_rows.append(
             {
                 "Card Number": "—",
-                "Customer Name": "—",
+                "Customer Name": sn,  # use sheet key as customer name
                 "Card Issued Store": "—",
                 "IDR per Ticket": np.nan,
                 "Cost Index (%)": np.nan,
                 "Flagging (IDR/Ticket)": "⚪ N/A",
                 "Cost Index Flag": "⚪ N/A",
                 "Phone Number": "—",
-                "Sheet": sn,
+                "_sheet_key": sn,
                 "Total Top Up (IDR)": np.nan,
                 "Top Up Count": np.nan,
                 "Total Tickets Inflow": np.nan,
@@ -832,7 +902,13 @@ for sn in digit_sheet_names:
 
 summary_df_raw = pd.DataFrame(summary_rows)
 
-# Ensure column order exactly as requested
+# Sort by Flagging - Fraud first, then Potential Fraud, then Normal
+flag_order = {"🔴 Fraud": 0, "🟠 Potential Fraud": 1, "🟢 Normal": 2, "⚪ N/A": 3}
+summary_df_raw["_flag_sort"] = summary_df_raw["Flagging (IDR/Ticket)"].map(flag_order).fillna(3)
+summary_df_raw = summary_df_raw.sort_values("_flag_sort").reset_index(drop=True)
+summary_df_raw = summary_df_raw.drop(columns=["_flag_sort"])
+
+# Ensure column order exactly as requested (without Sheet column for display)
 desired_order = [
     "Card Number",
     "Customer Name",
@@ -842,7 +918,6 @@ desired_order = [
     "Flagging (IDR/Ticket)",
     "Cost Index Flag",
     "Phone Number",
-    "Sheet",
     "Total Top Up (IDR)",
     "Top Up Count",
     "Total Tickets Inflow",
@@ -884,7 +959,6 @@ st.dataframe(
         "Flagging (IDR/Ticket)": st.column_config.TextColumn("Flagging (IDR/Ticket)"),
         "Cost Index Flag": st.column_config.TextColumn("Cost Index Flag"),
         "Phone Number": st.column_config.TextColumn("Phone Number", width="medium"),
-        "Sheet": st.column_config.TextColumn("Sheet", width="small"),
         "Total Top Up (IDR)": st.column_config.TextColumn("Total Top Up (IDR)"),
         "Top Up Count": st.column_config.TextColumn("Top Up Count", width="small"),
         "Total Tickets Inflow": st.column_config.TextColumn("Total Tickets Inflow"),
@@ -1340,20 +1414,33 @@ else:
 #     st.info("No per-card data available.")
 
 # ===========================
-# Faux "clickable row": render Open ▶ buttons
+# Customer Selection Dropdown
 # ===========================
 with st.container():
-    st.markdown("**Open a sheet:**")
-    btn_cols = st.columns(6)
-    per_row = 6
-    for i, sn in enumerate(summary_df_raw["Sheet"].astype(str).tolist()):
-        col = btn_cols[i % per_row]
-        if col.button(f"Open ▶ {sn}", key=f"open_{sn}"):
-            st.session_state.selected_sheet = sn
+    st.markdown("**Select Customer:**")
+    customer_options = summary_df_raw["Customer Name"].tolist()
+    sheet_keys = summary_df_raw["_sheet_key"].tolist()
+    
+    # Create mapping from display name to sheet key
+    customer_to_sheet = dict(zip(customer_options, sheet_keys))
+    
+    # Get current selection index
+    current_sheet = st.session_state.get("selected_sheet", sheet_keys[0] if sheet_keys else None)
+    current_idx = 0
+    if current_sheet in sheet_keys:
+        current_idx = sheet_keys.index(current_sheet)
+    
+    selected_customer = st.selectbox(
+        "Choose a customer to view details:",
+        options=customer_options,
+        index=current_idx,
+        key="customer_selector"
+    )
+    st.session_state.selected_sheet = customer_to_sheet.get(selected_customer, sheet_keys[0])
 
-# Default to first sheet if none selected
-selected_sheet = st.session_state.selected_sheet or summary_df_raw["Sheet"].iloc[0]
-st.markdown(f"---\n### 🔎 Detail — **{selected_sheet}**")
+# Get selected sheet key
+selected_sheet = st.session_state.selected_sheet
+st.markdown(f"---\n### 🔎 Detail — **{selected_customer}**")
 
 # ===========================
 # Detail view (single-sheet section)
