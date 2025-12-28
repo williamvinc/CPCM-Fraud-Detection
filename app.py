@@ -42,6 +42,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+def compute_fraud_score(idr_per_ticket: float, cost_index_pct: float) -> float:
+    if pd.isna(idr_per_ticket) or pd.isna(cost_index_pct):
+        return 0.0
+
+    idr_score = max(0.0, min(1.0, (10.0 - idr_per_ticket) / 10.0))
+    cost_score = max(0.0, min(1.0, cost_index_pct / 25.0))
+
+    return round((0.6 * idr_score + 0.4 * cost_score) * 100, 1)
+
 
 # ===========================
 # Branding helpers
@@ -222,7 +231,11 @@ def build_ticket_summary(
     COL_MANUAL_LOADED: str,
     COL_AMOUNT: str,
 ) -> Tuple[pd.DataFrame, float]:
-    TICKET_COLS_MAIN = [COL_TICKETS_EARNED, COL_REDEEM_LOADED, COL_MANUAL_LOADED]
+    TICKET_COLS_MAIN = [
+        COL_TICKETS_EARNED,
+        COL_REDEEM_LOADED,
+        COL_MANUAL_LOADED,
+    ]
     missing = [c for c in TICKET_COLS_MAIN + [COL_AMOUNT] if c not in df.columns]
     if missing:
         raise ValueError(f"Missing columns in data: {missing}")
@@ -401,7 +414,12 @@ def compute_overall_log(
     th_eff_potential: float,
 ) -> Dict[str, Any]:
     total_topup = float(df[COL_AMOUNT].sum()) if COL_AMOUNT in df.columns else 0.0
-    total_tickets = float(df[TICKET_COLS_ALL].sum().sum())
+    total_tickets = float(
+        df[TICKET_COLS_ALL]
+        .clip(lower=0)
+        .sum()
+        .sum()
+    )
 
     redeemed_raw = (
         float(df[COL_TICKETS_REDEEMED].sum())
@@ -416,11 +434,8 @@ def compute_overall_log(
     if COL_ACTIVITYTYPE in df.columns and COL_AMOUNT in df.columns:
         topup_count = int(
             df[
-                (
-                    df[COL_ACTIVITYTYPE].astype(str).str.upper().str.strip()
-                    == "TRANSACTION"
-                )
-                & (df[COL_AMOUNT] > 0)
+                (df[COL_AMOUNT] > 0) &
+                (df[COL_ACTIVITYTYPE].astype(str).str.upper() == "TRANSACTION")
             ].shape[0]
         )
     else:
@@ -578,7 +593,35 @@ def read_csv_like(upload: bytes) -> Dict[str, pd.DataFrame]:
     Returns dict where keys are unique Customer Name values.
     """
     bio = BytesIO(upload)
-    df_all = pd.read_csv(bio)
+    df_all = pd.read_csv(
+    bio,
+    dtype={
+        # identifiers / text
+        "Card_Number": "string",
+        "Card_No": "string",
+        "Customer_Name": "string",
+        "Phone_Number": "string",
+        "Username": "string",
+
+        # categorical (ULTRA FAST + HEMAT RAM)
+        "Activity_Site": "category",
+        "Card_Issued_Store": "category",
+        "Activity_Type": "category",
+        "Product_Game_Name": "category",
+
+        # numeric
+        "Amount": "float64",
+        "Tickets_Earned": "float64",
+        "Tickets_Manually_Loaded": "float64",
+        "Tickets_Loaded_via_TicketReceipts": "float64",
+        "Tickets_Loaded_Via_Transaction": "float64",
+        "Tickets_Redeemed": "float64",
+        "Redemption_Currency_Loaded": "float64",
+        "Loyalty_Points": "float64",
+    },
+    low_memory=False,  # penting
+)
+
     
     # Rename underscore columns to space-based naming (for compatibility with existing logic)
     col_rename = {
@@ -586,6 +629,7 @@ def read_csv_like(upload: bytes) -> Dict[str, pd.DataFrame]:
         "Activity_Site": "Activity Site",
         "Customer_Name": "Customer Name",
         "Phone_Number": "Phone Number",
+        "Card_Number": "Card Number",
         "Card_No": "Card Number",
         "Date_of_Activity": "Date of Activity",
         "Tickets_Earned": "Tickets Earned",
@@ -598,7 +642,7 @@ def read_csv_like(upload: bytes) -> Dict[str, pd.DataFrame]:
         "Activity_Type": "ActivityType",
         "Product_Game_Name": "Product / Game Name",
         # Additional potential column names
-        "Total_Ticket_Loaded": "Total Tickets Loaded",
+        # "Total_Ticket_Loaded": "Total Tickets Loaded",
     }
     df_all = df_all.rename(columns=col_rename)
     
@@ -617,19 +661,25 @@ def read_csv_like(upload: bytes) -> Dict[str, pd.DataFrame]:
         if col not in df_all.columns:
             df_all[col] = 0
     
-    # Group by Customer Name - each unique customer becomes a "sheet"
-    customer_col = "Customer Name"
-    grouped: Dict[str, pd.DataFrame] = {}
-    
-    if customer_col in df_all.columns:
-        for cust_name, cust_df in df_all.groupby(customer_col, dropna=False):
-            sheet_key = str(cust_name) if pd.notna(cust_name) else "Unknown"
-            grouped[sheet_key] = cust_df.reset_index(drop=True)
-    else:
-        # Fallback: treat the entire CSV as one "sheet"
-        grouped["All Data"] = df_all.reset_index(drop=True)
-    
+    # Group by Card Number - each card becomes a "sheet"
+    card_col = "Card Number"
+
+    if card_col not in df_all.columns:
+        raise ValueError("CSV must contain Card Number column")
+
+    grouped = {}
+    df_all["Card Number"] = (
+        df_all["Card Number"]
+        .astype(str)
+        .str.strip()
+        .replace({"nan": np.nan, "None": np.nan, "": np.nan})
+    )
+
+    for card_no, card_df in df_all.groupby(card_col, dropna=False):
+        sheet_key = str(card_no) if pd.notna(card_no) else "UNKNOWN_CARD"
+        grouped[sheet_key] = card_df.reset_index(drop=True)
     return grouped
+
 
 
 @st.cache_data(show_spinner=False)
@@ -664,10 +714,11 @@ def prepare_dataframe(df: pd.DataFrame, colmap: Dict[str, str]) -> pd.DataFrame:
 
     # Rule: if Amount has value but Card Issued Store is empty -> drop
     if ("Amount" in dfx.columns) and ("Card Issued Store" in dfx.columns):
-        mask_bad = dfx["Amount"].notna() & dfx["Card Issued Store"].fillna(
-            ""
-        ).str.strip().eq("")
-        dfx = dfx.loc[not mask_bad if isinstance(mask_bad, bool) else ~mask_bad].copy()
+        mask_bad = (
+            (dfx["Amount"] > 0) &
+            dfx["Card Issued Store"].fillna("").str.strip().eq("")
+        )
+        dfx = dfx.loc[~mask_bad].copy()
 
     return dfx
 
@@ -764,7 +815,7 @@ if "selected_sheet" not in st.session_state:
 st.title("CPCM — Ticket Fraud Analysis")
 st.markdown(
     "Upload your arcade transaction file (CSV/ODS/Excel). The app will:\n"
-    "1) **Group data by Customer Name** (for CSV) or **scan sheets starting with a digit** (for Excel).\n"
+    "1) Group data by Card Number (for CSV) or scan sheets starting with a digit (for Excel).\n"
     "2) **Build a summary per customer** → click **Open ▶** to see **details**.\n"
 )
 
@@ -777,20 +828,22 @@ if uploaded is None:
 
 # Read all sheets / customers (cached)
 is_csv = uploaded.name.lower().endswith(".csv")
-if is_csv:
-    all_sheets = read_csv_like(uploaded.getvalue())
-    # For CSV, use all customer names as "sheet" names
-    digit_sheet_names = list(all_sheets.keys())
-else:
-    all_sheets = read_excel_like(
-        uploaded.getvalue(), "odf" if uploaded.name.lower().endswith(".ods") else None
-    )
-    # Keep only sheet names that start with a digit
-    digit_sheet_names = [sn for sn in all_sheets.keys() if re.match(r"^\s*\d", str(sn))]
 
-if not digit_sheet_names:
-    st.warning("No customers/sheets found. Please check the file format.")
+with st.spinner("Reading input file, please wait..."):
+    if is_csv:
+        all_sheets = read_csv_like(uploaded.getvalue())
+        sheet_keys = list(all_sheets.keys())
+    else:
+        all_sheets = read_excel_like(
+            uploaded.getvalue(),
+            "odf" if uploaded.name.lower().endswith(".ods") else None,
+        )
+        sheet_keys = [sn for sn in all_sheets.keys() if re.match(r"^\s*\d", str(sn))]
+
+if not sheet_keys:
+    st.warning("No cards/sheets found. Please check the file format.")
     st.stop()
+
 
 # ===========================
 # Aliases
@@ -836,7 +889,10 @@ def _flag_emoji(flag: str) -> str:
 prepared_per_sheet: Dict[str, pd.DataFrame] = {}
 summary_rows: List[Dict[str, Any]] = []
 
-for sn in digit_sheet_names:
+progress = st.progress(0, text="Processing customer summaries...")
+total = len(sheet_keys)
+
+for i, sn in enumerate(sheet_keys):
     raw_df = all_sheets[sn]
     try:
         dfn = prepare_dataframe(raw_df, colmap)
@@ -861,11 +917,17 @@ for sn in digit_sheet_names:
             th_eff_potential=th_eff_potential,
         )
 
+        fraud_score = compute_fraud_score(
+            overall["idr_per_ticket"],
+            overall["value_eff_pct"],
+        )
+
         summary_rows.append(
             {
-                "Card Number": card_no or "—",
-                "Customer Name": cust_name or sn,  # fallback to sheet name (customer name from CSV grouping)
+                "Customer Name": cust_name or "—",
+                "Card Number": card_no or sn,
                 "Card Issued Store": card_store or "—",
+                "Fraud Score": fraud_score,
                 "IDR per Ticket": overall["idr_per_ticket"],
                 "Cost Index (%)": overall["value_eff_pct"],
                 "Flagging (IDR/Ticket)": _flag_emoji(overall["flag"]),
@@ -899,17 +961,23 @@ for sn in digit_sheet_names:
             }
         )
         st.warning(f"Sheet '{sn}' failed to compute: {e}")
-
+    progress.progress(
+        (i + 1) / total,
+        text=f"Processing {i + 1}/{total} cards"
+    )
+progress.empty()
 summary_df_raw = pd.DataFrame(summary_rows)
 
 # Sort by Flagging - Fraud first, then Potential Fraud, then Normal
 flag_order = {"🔴 Fraud": 0, "🟠 Potential Fraud": 1, "🟢 Normal": 2, "⚪ N/A": 3}
-summary_df_raw["_flag_sort"] = summary_df_raw["Flagging (IDR/Ticket)"].map(flag_order).fillna(3)
-summary_df_raw = summary_df_raw.sort_values("_flag_sort").reset_index(drop=True)
-summary_df_raw = summary_df_raw.drop(columns=["_flag_sort"])
+summary_df_raw = summary_df_raw.sort_values(
+    ["Fraud Score", "Flagging (IDR/Ticket)"],
+    ascending=[False, True],
+).reset_index(drop=True)
 
 # Ensure column order exactly as requested (without Sheet column for display)
 desired_order = [
+    "Fraud Score",
     "Card Number",
     "Customer Name",
     "Card Issued Store",
@@ -934,6 +1002,7 @@ summary_df_raw = summary_df_raw.reindex(columns=cols)
 summary_df_display = format_dataframe_columns(
     summary_df_raw,
     {
+        "Fraud Score": 1,
         "IDR per Ticket": 2,
         "Cost Index (%)": 2,
         "Total Top Up (IDR)": 0,
@@ -1007,7 +1076,11 @@ for sn, dfn in prepared_per_sheet.items():
                 .reset_index()
             )
             # compute total tickets inflow per site
-            t["Total Tickets Inflow"] = t[ticket_cols_present_local].sum(axis=1)
+            t["Total Tickets Inflow"] = (
+                t[ticket_cols_present_local]
+                .clip(lower=0)
+                .sum(axis=1)
+            )
             t = t[[COL_SITE, "Total Tickets Inflow"]]
             t["Sheet"] = sn
             site_tickets_frames.append(t)
@@ -1133,23 +1206,29 @@ with st.expander(f"📈 Cross-Sheet Charts — Top {top_k_sets} Activity Sites")
 
 # --- Cross-branch analysis (all sheets combined)
 # concat semua prepared sheets menjadi satu DF global
-all_df = pd.concat([df for df in prepared_per_sheet.values() if df is not None], ignore_index=True) if prepared_per_sheet else pd.DataFrame()
+with st.spinner("⏳ Building cross-branch analytics..."):
+    all_df = pd.concat([df for df in prepared_per_sheet.values() if df is not None], ignore_index=True) if prepared_per_sheet else pd.DataFrame()
 
-# normalisasi nama kolom (pastikan tersedia)
-for c in [COL_STORE, COL_SITE, COL_AMOUNT, COL_TICKETS_EARNED, COL_REDEEM_LOADED, COL_MANUAL_LOADED, COL_TICKETS_REDEEMED, COL_DATE, COL_CARDNO]:
-    if c not in all_df.columns:
-        # create empty col to avoid KeyErrors later
-        all_df[c] = np.nan
+    # normalisasi nama kolom (pastikan tersedia)
+    for c in [COL_STORE, COL_SITE, COL_AMOUNT, COL_TICKETS_EARNED, COL_REDEEM_LOADED, COL_MANUAL_LOADED, COL_TICKETS_REDEEMED, COL_DATE, COL_CARDNO]:
+        if c not in all_df.columns:
+            # create empty col to avoid KeyErrors later
+            all_df[c] = np.nan
 
-# convert to proper dtypes (prepare_dataframe already did per sheet, but safe)
-_to_numeric_safe(all_df, ["Amount", "Tickets Redeemed", "Loyalty Points",
-                          "Tickets Earned", "Redemption Currency Loaded",
-                          "Tickets Manually Loaded", "Tickets Loaded Via TicketReceipts",
-                          "Tickets Loaded Via Transaction"])
+    # convert to proper dtypes (prepare_dataframe already did per sheet, but safe)
+    _to_numeric_safe(all_df, ["Amount", "Tickets Redeemed", "Loyalty Points",
+                            "Tickets Earned", "Redemption Currency Loaded",
+                            "Tickets Manually Loaded", "Tickets Loaded Via TicketReceipts",
+                            "Tickets Loaded Via Transaction"])
 
 # Define cross-branch flag (ignore case + trim)
-all_df["Card_Issued_Store_clean"] = all_df[COL_STORE].astype(str).str.strip()
-all_df["Activity_Site_clean"] = all_df[COL_SITE].astype(str).str.strip()
+all_df["Card_Issued_Store_clean"] = (
+    all_df[COL_STORE].astype(str).str.strip().replace("", np.nan)
+)
+all_df["Activity_Site_clean"] = (
+    all_df[COL_SITE].astype(str).str.strip().replace("", np.nan)
+)
+
 all_df["is_cross_branch"] = (
     (~all_df["Card_Issued_Store_clean"].isna())
     & (~all_df["Activity_Site_clean"].isna())
@@ -1167,7 +1246,13 @@ total_cards = int(all_df[COL_CARDNO].nunique()) if COL_CARDNO in all_df.columns 
 cards_with_cross = int(cross_df[COL_CARDNO].nunique()) if COL_CARDNO in cross_df.columns else int(cross_df["Card Number"].nunique())
 pct_cards_cross = 100.0 * cards_with_cross / total_cards if total_cards > 0 else np.nan
 total_topup_cross = float(cross_df["Amount"].sum()) if "Amount" in cross_df.columns else 0.0
-total_tickets_cross = float(cross_df[ticket_cols_present].sum().sum()) if ticket_cols_present else 0.0
+total_tickets_cross = float(
+    cross_df[ticket_cols_present]
+    .clip(lower=0)
+    .sum()
+    .sum()
+) if ticket_cols_present else 0.0
+
 
 # Top origin stores by outbound cross-branch topup (Top 20)
 outbound = (
@@ -1245,7 +1330,11 @@ inbound_sites = (
 # Top tickets inflow per destination (cross-branch)
 ticket_cols_present = [c for c in TICKET_COLS_ALL if c in cross_df.columns]
 if ticket_cols_present:
-    cross_df["Total Tickets Inflow (cross-branch)"] = cross_df[ticket_cols_present].sum(axis=1)
+    cross_df["Total Tickets Inflow (cross-branch)"] = (
+        cross_df[ticket_cols_present]
+        .clip(lower=0)
+        .sum(axis=1)
+    )
 else:
     cross_df["Total Tickets Inflow (cross-branch)"] = 0
 
@@ -1418,7 +1507,10 @@ else:
 # ===========================
 with st.container():
     st.markdown("**Select Customer:**")
-    customer_options = summary_df_raw["Customer Name"].tolist()
+    customer_options = [
+        f"{row['Customer Name']} | {row['Card Number']}"
+        for _, row in summary_df_raw.iterrows()
+    ]
     sheet_keys = summary_df_raw["_sheet_key"].tolist()
     
     # Create mapping from display name to sheet key
@@ -1561,13 +1653,7 @@ with st.expander("Why is it flagged? (numbers vs thresholds)"):
 # ===========================
 st.subheader("💳 Customer Top-Up History")
 try:
-    mask_amount = df[COL_AMOUNT] > 0
-    mask_tx = (
-        df[COL_ACTIVITYTYPE].astype(str).str.upper().str.strip().eq("TRANSACTION")
-        if COL_ACTIVITYTYPE in df.columns
-        else True
-    )
-    df_topup = df[mask_amount & mask_tx].copy()
+    df_topup = df[df[COL_AMOUNT] > 0].copy()
 
     keep_cols = [
         c
@@ -1711,7 +1797,12 @@ if COL_SITE in df.columns:
         .reset_index()
     )
 
-    site_agg["Total Tickets Inflow"] = site_agg[TICKET_COLS_ALL].sum(axis=1)
+    site_agg["Total Tickets Inflow"] = (
+        site_agg[TICKET_COLS_ALL]
+        .clip(lower=0)
+        .sum(axis=1)
+    )
+
     site_agg = site_agg.sort_values("Total Tickets Inflow", ascending=False)
 
     format_map = {col: 0 for col in TICKET_COLS_ALL + ["Total Tickets Inflow"]}
